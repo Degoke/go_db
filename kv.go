@@ -16,6 +16,7 @@ type KV struct {
 	//internals
 	fp *os.File
 	tree BTree
+	free FreeList
 	mmap struct {
 		file int // file size, can be larger than the database size
 		total int // nmap size, can be larger than the file size
@@ -23,12 +24,24 @@ type KV struct {
 	}
 	page struct {
 		flushed uint64 // database size in number o f pages
-		temp [][]byte // newly allocated pages
+		nfree int // number of pages taken from the free list
+		nappend int //number of pages to be appended
+		// newly allocated or deallocated pages keyed by the pointer
+		// nil value denotes a deallocated page
+		updates map[uint64][]byte
 	}
 }
 
-// callback for BTree, dereference a pointer
+// callback for BTree & FreeList, dereference a pointer
 func (db *KV) pageGet(ptr uint64) BNode {
+	if page, ok := db.page.updates[ptr]; ok {
+		assert(page != nil)
+		return BNode{page} // for new pages
+	}
+	return pageGetMapped(db, ptr)
+}
+
+func pageGetMapped(db *KV, ptr uint64) BNode {
 	start := uint64(0)
 	for _, chunk := range db.mmap.chunks {
 		end := start + uint64(len(chunk)) / BTREE_PAGE_SIZE
@@ -43,17 +56,39 @@ func (db *KV) pageGet(ptr uint64) BNode {
 
 // callback for Btree, allocate a new page
 func (db *KV) pageNew(node BNode) uint64 {
-	// TODO: reuse deallocated pages
 	assert(len(node.data) <= BTREE_PAGE_SIZE)
+	ptr := uint64(0)
 
-	ptr := db.page.flushed + uint64(len(db.page.temp))
-	db.page.temp = append(db.page.temp, node.data)
+	if db.page.nfree < db.free.Total() {
+		// reuse a deallocated page
+		ptr = db.free.Get(db.page.nfree)
+		db.page.nfree ++
+	} else {
+		// append a new page
+		ptr = db.page.flushed + uint64(db.page.nappend)
+		db.page.nappend++
+	}
+	db.page.updates[ptr] = node.data
 	return ptr
 }
 
 // callback for BTree, deallocate a page
-func (db *KV) pageDel(uint64) {
-	// TODO: implemet this
+func (db *KV) pageDel(ptr uint64) {
+	db.page.updates[ptr] = nil
+}
+
+// callback for FreeList allocate a new page
+func (db *KV) pageAppend(node BNode) uint64 {
+	assert(len(node.data) <= BTREE_PAGE_SIZE)
+	ptr := db.page.flushed + uint64(db.page.nappend)
+	db.page.nappend++
+	db.page.updates[ptr] = node.data
+	return ptr
+}
+
+// callback fro FreeList reuse a page
+func (db *KV) pageUse(ptr uint64, node BNode) {
+	db.page.updates[ptr] = node.data
 }
 
 func (db *KV) Open() error {
@@ -126,8 +161,17 @@ func flushPages(db *KV) error {
 }
 
 func writePages(db *KV) error {
-	// extend the file and mmap if needed
-	npages := int(db.page.flushed) + len(db.page.temp)
+	// update the FreeList
+	freed := []uint64{}
+	for ptr, page := range db.page.updates {
+		if page == nil {
+			freed = append(freed, ptr)
+		}
+	}
+	db.free.Update(db.page.nfree, freed)
+
+	// extend the file and mmap if nee	// TODO: implemet this
+	npages := int(db.page.flushed) + db.page.nappend
 	if err := extendFile(db, npages); err != nil {
 		return err
 	}
@@ -136,11 +180,13 @@ func writePages(db *KV) error {
 		return err
 	}
 
-	// copy data to the file
-	for i, page := range db.page.temp {
-		ptr := db.page.flushed + uint64(i)
-		copy(db.pageGet(ptr).data, page)
+	// copy pages to the file
+	for ptr, page := range db.page.updates {
+		if page != nil {
+			copy(pageGetMapped(db, ptr).data, page)
+		}
 	}
+
 	return nil
 }
 
@@ -150,8 +196,10 @@ func syncPages(db *KV) error {
 		return fmt.Errorf("fsync: %w", err)
 	}
 
-	db.page.flushed += uint64(len(db.page.temp))
-	db.page.temp = db.page.temp[:0]
+	db.page.flushed += uint64(db.page.nappend)
+	db.page.nfree = 0
+	db.page.nappend = 0
+	db.page.updates = map[uint64][]byte{}
 
 	// update and flush the master page
 	if err := masterStore(db); err != nil {
