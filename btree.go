@@ -529,6 +529,8 @@ func (tree *BTree) Insert(key []byte, val []byte) {
   }
 }
 
+func (tree *BTree) InsertEx(req *InsertReq)
+
 func nodeGetKey(tree *BTree, node BNode, key []byte) ([]byte, bool) {
   idx := nodeLookupLe(node, key)
   switch node.btype() {

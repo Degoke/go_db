@@ -137,7 +137,7 @@ func (db *KV) Close() {
 }
 
 // read the db
-func (db *KV) get(key []byte) ([]byte, bool) {
+func (db *KV) Get(key []byte) ([]byte, bool) {
 	return db.tree.Get(key)
 }
 
@@ -151,6 +151,8 @@ func (db *KV) Del(key []byte) (bool, error) {
 	deleted := db.tree.Delete(key)
 	return deleted, flushPages(db)
 }
+
+func (db *KV) Update(key []byte, val []byte, mode int) (bool, error)
 
 //persist the newly allocated pages after upmdates
 func flushPages(db *KV) error {
