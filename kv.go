@@ -152,7 +152,11 @@ func (db *KV) Del(key []byte) (bool, error) {
 	return deleted, flushPages(db)
 }
 
-func (db *KV) Update(key []byte, val []byte, mode int) (bool, error)
+func (db *KV) Update(key []byte, val []byte, mode int) (bool, error) {
+	req := &InsertReq{Key: key, Val: val, Mode: mode}
+	db.tree.InsertEx(req)
+	return req.Added, flushPages(db)
+}
 
 //persist the newly allocated pages after upmdates
 func flushPages(db *KV) error {

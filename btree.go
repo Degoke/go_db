@@ -310,28 +310,42 @@ func leafUpdate(
 // insert a kv into a node, the result might be split into 2 nodes
 // the caller is responsible for deallocating the input node
 // and splitting and allocating result nodes
-func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
+func treeInsert(req *InsertReq, node BNode) BNode {
   //// the result node
   // allowed to be bigger than 1 page and will be split if so 
   new := BNode{data: make([]byte, 2 * BTREE_PAGE_SIZE)}
 
   // where to insert the key
-  idx := nodeLookupLe(node, key);
+  idx := nodeLookupLe(node, req.Key);
 
   // act depending on the nodetype
   switch node.btype() {
   case BNODE_LEAF:
   // leaf, node.getKey(idx) <= key
-    if bytes.Equal(key, node.getKey(idx)) {
+    if bytes.Equal(req.Key, node.getKey(idx)) {
       // found the key, update it
-      leafUpdate(new, node, idx, key, val)
+      if req.Mode == MODE_INSERT_ONLY {
+        return BNode{}
+      }
+
+      if bytes.Equal(req.Val, node.getVal(idx)) {
+        return BNode{}
+      }
+
+      leafUpdate(new, node, idx, req.Key, req.Val)
     } else {
       // insert it after the position
-      leafInsert(new, node, idx + 1, key, val)
+
+      if req.Mode == MODE_UPDATE_ONLY {
+        return BNode{}
+      }
+
+      leafInsert(new, node, idx + 1, req.Key, req.Val)
+      req.Added = true
     }
   case BNODE_NODE:
     // internal node, insert it to a kid nod3
-    nodeInsert(tree, new, node, idx, key, val)
+    return nodeInsert(req, new, node, idx)
   default:
     panic("bad node!")
   }
@@ -340,21 +354,22 @@ func treeInsert(tree *BTree, node BNode, key []byte, val []byte) BNode {
 }
 
 // part of the treeInsert(): KV insertion to an internal node
-func nodeInsert(
-  tree *BTree, new BNode, node BNode, idx uint16,
-  key []byte, val []byte,
-) {
-  // get and deallocate the kid node
-  kptr := node.getPtr(idx)
-  knode := tree.get(kptr)
-  tree.del(kptr)
+func nodeInsert(req *InsertReq, new BNode, node BNode, idx uint16) BNode {
 
   // recursive indertion to the kid node
-  knode = treeInsert(tree, knode, key, val)
+  kptr := node.getPtr(idx)
+  updated := treeInsert(req, req.tree.get(kptr))
+  if len(updated.data) == 0 {
+    return BNode{}
+  }
+
+  // deallocate the kidnode
+  req.tree.del(kptr)
   // split the result
-  nsplit, splitted := nodeSplit3(knode)
-  // update the kid links
-  nodeReplaceKidN(tree, new, node, idx, splitted[:nsplit]...)
+  nsplit, splited := nodeSplit3(updated)
+  //update the kid links
+  nodeReplaceKidN(req.tree,new, node, idx, splited[:nsplit]...)
+  return new
 }
 
 //remove a key from a leaf node
@@ -529,7 +544,47 @@ func (tree *BTree) Insert(key []byte, val []byte) {
   }
 }
 
-func (tree *BTree) InsertEx(req *InsertReq)
+func (tree *BTree) InsertEx(req *InsertReq) {
+  assert(len(req.Key) != 0)
+  assert(len(req.Key) <= BTREE_MAX_KEY_SIZE)
+  assert(len(req.Val) <= BTREE_MAX_VAL_SIZE)
+
+  if tree.root == 0 {
+    // create the first node
+    root := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+    root.setHeader(BNODE_LEAF, 2)
+    
+    // a dummy key, this makes the tree cover the whole key space
+    // thuis a lokkup can always find a containing node
+    nodeAppendKv(root, 0, 0, nil, nil)
+    nodeAppendKv(root, 1, 0, req.Key, req.Val)
+    tree.root = tree.new(root)
+    req.Added = true
+  }
+
+  req.tree = tree
+  updated := treeInsert(req, tree.get(tree.root))
+  if len(updated.data) == 0 {
+    return
+  }
+
+  // replace the root node
+  tree.del(tree.root)
+  nsplit, splitted := nodeSplit3(updated)
+  if nsplit > 1 {
+    // the root was split, add a new level
+    root := BNode{data: make([]byte, BTREE_PAGE_SIZE)}
+    root.setHeader(BNODE_NODE, nsplit)
+
+    for i, knode := range splitted[:nsplit] {
+      ptr, key := tree.new(knode), knode.getKey(0)
+      nodeAppendKv(root, uint16(i), ptr, key, nil)
+    }
+    tree.root = tree.new(root)
+  } else {
+    tree.root = tree.new(splitted[0])
+  }
+}
 
 func nodeGetKey(tree *BTree, node BNode, key []byte) ([]byte, bool) {
   idx := nodeLookupLe(node, key)
